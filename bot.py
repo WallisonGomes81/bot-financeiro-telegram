@@ -4,7 +4,10 @@ from datetime import datetime
 from flask import Flask, request
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes,
+    MessageHandler, filters
+)
 
 # =========================
 # CARREGAR VARIÁVEIS DE AMBIENTE
@@ -33,27 +36,22 @@ def init_db():
     conn.close()
 
 def adicionar_transacao(user_id, valor, descricao, categoria):
-    conn = None
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        data = datetime.now().strftime("%Y-%m-%d")
-        c.execute("INSERT INTO transacoes (user_id, valor, descricao, categoria, data) VALUES (?, ?, ?, ?, ?)",
-                  (user_id, valor, descricao, categoria, data))
-        conn.commit()
-    except Exception as e:
-        print("Erro ao adicionar transação:", e)
-    finally:
-        if conn:
-            conn.close()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    data = datetime.now().strftime("%Y-%m-%d")
+    c.execute(
+        "INSERT INTO transacoes (user_id, valor, descricao, categoria, data) VALUES (?, ?, ?, ?, ?)",
+        (user_id, valor, descricao, categoria, data)
+    )
+    conn.commit()
+    conn.close()
 
 def obter_relatorio_mes(user_id, mes=None, ano=None):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    if not mes or not ano:
-        hoje = datetime.now()
-        mes = hoje.month
-        ano = hoje.year
+    hoje = datetime.now()
+    mes = mes or hoje.month
+    ano = ano or hoje.year
     c.execute("""
         SELECT categoria, SUM(valor)
         FROM transacoes
@@ -71,7 +69,7 @@ app = Flask(__name__)
 bot = Bot(TOKEN)
 
 # =========================
-# MENUS E BOTÕES
+# MENU DE BOTÕES
 # =========================
 def menu_keyboard():
     return InlineKeyboardMarkup([
@@ -80,11 +78,11 @@ def menu_keyboard():
     ])
 
 # =========================
-# COMANDOS DO BOT
+# COMANDOS
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Olá! Bem-vindo ao Bot Financeiro. Escolha uma opção:",
+        "Olá! Bem-vindo ao Bot Financeiro! Escolha uma opção:",
         reply_markup=menu_keyboard()
     )
 
@@ -128,24 +126,29 @@ async def mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE):
             descricao = partes[1]
             categoria = partes[2]
             adicionar_transacao(user_id, valor, descricao, categoria)
-            await update.message.reply_text(f"✅ Transação adicionada: {descricao} - R$ {valor:.2f} ({categoria})",
-                                            reply_markup=menu_keyboard())
+            await update.message.reply_text(
+                f"✅ Transação adicionada: {descricao} - R$ {valor:.2f} ({categoria})",
+                reply_markup=menu_keyboard()
+            )
         except:
-            await update.message.reply_text("❌ Formato inválido! Use `valor;descricao;categoria`")
+            await update.message.reply_text(
+                "❌ Formato inválido! Use `valor;descricao;categoria`",
+                reply_markup=menu_keyboard()
+            )
         context.user_data['esperando_transacao'] = False
     else:
-        await update.message.reply_text("Use os botões para interagir com o bot (/start).",
-                                        reply_markup=menu_keyboard())
+        await update.message.reply_text(
+            "Use os botões para interagir com o bot (/start).",
+            reply_markup=menu_keyboard()
+        )
 
 # =========================
 # CONFIGURAR TELEGRAM APPLICATION
 # =========================
-from telegram.ext import Application
-
 application = ApplicationBuilder().token(TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(button))
-application.add_handler(application.builder.message_handler(mensagem))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, mensagem))
 
 # =========================
 # ROTA WEBHOOK
@@ -162,5 +165,4 @@ def webhook():
 if __name__ == "__main__":
     init_db()
     print("Bot rodando...")
-    # Usar polling localmente
     application.run_polling()
