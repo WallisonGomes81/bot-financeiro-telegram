@@ -1,166 +1,120 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+import os
 import sqlite3
-import datetime
+from datetime import datetime
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
+# =========================
+# CONFIGURAÇÕES
+# =========================
+TOKEN = os.environ.get("8596236102:AAGS6gAvqZy12oYVku4znan7koF20ZuJphs")  # Token do bot no Render (env variable)
 DB_PATH = "financeiro.db"
 
-# ===== Banco de dados =====
-def get_db():
+# =========================
+# BANCO DE DADOS
+# =========================
+def init_db():
     conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    c = conn.cursor()
+    # Tabela de transações
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS transacoes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            valor REAL,
+            descricao TEXT,
+            categoria TEXT,
+            data TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
 
-# ===== Menu inicial =====
-def menu_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💰 Saldo", callback_data="saldo")],
-        [InlineKeyboardButton("➕ Entrada", callback_data="entrada")],
-        [InlineKeyboardButton("➖ Saída", callback_data="saida")],
-        [InlineKeyboardButton("📊 Relatório mês atual", callback_data="relatorio")],
-        [InlineKeyboardButton("📅 Relatório mês específico", callback_data="relatorio_mes")]
-    ])
+def adicionar_transacao(valor, descricao, categoria):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    data = datetime.now().strftime("%Y-%m-%d")
+    c.execute("INSERT INTO transacoes (valor, descricao, categoria, data) VALUES (?, ?, ?, ?)",
+              (valor, descricao, categoria, data))
+    conn.commit()
+    conn.close()
 
+def obter_relatorio_mes(mes=None, ano=None):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    if not mes or not ano:
+        mes = datetime.now().month
+        ano = datetime.now().year
+    c.execute("""
+        SELECT categoria, SUM(valor) 
+        FROM transacoes 
+        WHERE strftime('%m', data) = ? AND strftime('%Y', data) = ?
+        GROUP BY categoria
+    """, (f"{mes:02d}", str(ano)))
+    resultado = c.fetchall()
+    conn.close()
+    return resultado
+
+# =========================
+# COMANDOS DO BOT
+# =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Olá! Eu sou seu bot de controle financeiro.\nEscolha uma opção:",
-        reply_markup=menu_keyboard()
-    )
+    keyboard = [
+        [InlineKeyboardButton("💰 Adicionar Receita", callback_data='adicionar')],
+        [InlineKeyboardButton("📊 Relatório Mensal", callback_data='relatorio')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Olá! Bem-vindo ao Bot Financeiro.", reply_markup=reply_markup)
 
-# ===== Botões =====
+# =========================
+# CALLBACKS DOS BOTÕES
+# =========================
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data
+    
+    if query.data == 'adicionar':
+        await query.edit_message_text("Envie a transação no formato:\n`valor;descricao;categoria`", parse_mode="Markdown")
+        context.user_data['esperando_transacao'] = True
 
-    if data == "saldo":
-        db = get_db()
-        cursor = db.cursor()
-        cursor.execute("SELECT valor FROM saldo WHERE id=1")
-        saldo = cursor.fetchone()["valor"]
-        db.close()
-        await query.edit_message_text(f"💰 Saldo atual: R$ {saldo:.2f}", reply_markup=menu_keyboard())
-
-    elif data in ["entrada", "saida"]:
-        context.user_data["acao"] = data
-        await query.edit_message_text(
-            f"Digite o valor e descrição para {data} separados por espaço, ex: `100 Venda`",
-            parse_mode='Markdown'
-        )
-
-    elif data == "relatorio":
-        await gerar_relatorio(query, mes_atual=True)
-
-    elif data == "relatorio_mes":
-        context.user_data["relatorio_especifico"] = True
-        await query.edit_message_text(
-            "Digite o mês e ano no formato MM AAAA, ex: 01 2026"
-        )
-
-# ===== Função para gerar relatório =====
-async def gerar_relatorio(query, mes_atual=False, mes=None, ano=None):
-    db = get_db()
-    cursor = db.cursor()
-
-    if mes_atual:
-        hoje = datetime.date.today()
-        primeiro_dia_mes = hoje.replace(day=1)
-        ultimo_dia = hoje
-        titulo = f"📊 Relatório do mês {hoje.strftime('%m/%Y')}"
-    else:
-        primeiro_dia_mes = f"{ano}-{mes:02d}-01"
-        if mes == 12:
-            ultimo_dia = f"{ano}-12-31"
+    elif query.data == 'relatorio':
+        relatorio = obter_relatorio_mes()
+        if not relatorio:
+            texto = "Nenhuma transação registrada este mês."
         else:
-            ultimo_dia = f"{ano}-{mes+1:02d}-01"
-        titulo = f"📊 Relatório de {mes:02d}/{ano}"
+            texto = "📊 Relatório do mês:\n"
+            for categoria, total in relatorio:
+                texto += f"{categoria}: R$ {total:.2f}\n"
+        await query.edit_message_text(texto)
 
-    cursor.execute("""
-        SELECT tipo, SUM(valor) as total
-        FROM movimentacoes
-        WHERE date(data) >= ? AND date(data) < ?
-        GROUP BY tipo
-    """, (primeiro_dia_mes, ultimo_dia))
-    resultados = cursor.fetchall()
-    db.close()
-
-    entrada = 0
-    saida = 0
-    for row in resultados:
-        if row["tipo"] == "entrada":
-            entrada = row["total"]
-        elif row["tipo"] == "saida":
-            saida = row["total"]
-
-    saldo_periodo = entrada - saida
-    mensagem = f"{titulo}:\nEntradas: R$ {entrada:.2f}\nSaídas: R$ {saida:.2f}\nSaldo: R$ {saldo_periodo:.2f}"
-    await query.edit_message_text(mensagem, reply_markup=menu_keyboard())
-
-# ===== Receber mensagem do usuário =====
+# =========================
+# RECEBER MENSAGENS
+# =========================
 async def mensagem(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db = get_db()
-    cursor = db.cursor()
-
-    # Relatório mês específico
-    if context.user_data.get("relatorio_especifico"):
+    if context.user_data.get('esperando_transacao'):
+        texto = update.message.text
         try:
-            mes, ano = map(int, update.message.text.split())
-            await gerar_relatorio(update.message, mes_atual=False, mes=mes, ano=ano)
+            valor, descricao, categoria = [x.strip() for x in texto.split(";")]
+            valor = float(valor.replace(",", "."))
+            adicionar_transacao(valor, descricao, categoria)
+            await update.message.reply_text(f"✅ Transação adicionada: {descricao} - R$ {valor:.2f} ({categoria})")
         except:
-            await update.message.reply_text("Formato inválido. Use MM AAAA, ex: 01 2026")
-        context.user_data.pop("relatorio_especifico")
-        return
+            await update.message.reply_text("❌ Formato inválido! Use `valor;descricao;categoria`")
+        context.user_data['esperando_transacao'] = False
+    else:
+        await update.message.reply_text("Use os botões para interagir com o bot (/start).")
 
-    # Entrada ou saída
-    acao = context.user_data.get("acao")
-    if acao in ["entrada", "saida"]:
-        try:
-            partes = update.message.text.split()
-            valor = float(partes[0])
-            descricao = " ".join(partes[1:]) if len(partes) > 1 else acao.capitalize()
-
-            # Pergunta confirmação
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Confirmar", callback_data=f"confirma_{acao}_{valor}_{descricao}")],
-                [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")]
-            ])
-            await update.message.reply_text(f"Confirme {acao}: R$ {valor:.2f} - {descricao}", reply_markup=keyboard)
-        except:
-            await update.message.reply_text("Formato inválido. Exemplo: 100 Venda")
-        return
-
-# ===== Confirmar entrada/saída =====
-async def confirma(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-
-    if data.startswith("confirma_"):
-        _, acao, valor, descricao = data.split("_", 3)
-        valor = float(valor)
-        db = get_db()
-        cursor = db.cursor()
-        if acao == "entrada":
-            cursor.execute("INSERT INTO movimentacoes (tipo, valor, descricao) VALUES (?, ?, ?)", ("entrada", valor, descricao))
-            cursor.execute("UPDATE saldo SET valor = valor + ? WHERE id=1", (valor,))
-        else:
-            cursor.execute("INSERT INTO movimentacoes (tipo, valor, descricao) VALUES (?, ?, ?)", ("saida", valor, descricao))
-            cursor.execute("UPDATE saldo SET valor = valor - ? WHERE id=1", (valor,))
-        db.commit()
-        db.close()
-        await query.edit_message_text(f"{acao.capitalize()} confirmada: R$ {valor:.2f} - {descricao}", reply_markup=menu_keyboard())
-
-    elif data == "cancelar":
-        await query.edit_message_text("Operação cancelada.", reply_markup=menu_keyboard())
-
-    context.user_data.pop("acao", None)
-
-# ===== Inicializar bot =====
-app = ApplicationBuilder().token("8596236102:AAGS6gAvqZy12oYVku4znan7koF20ZuJphs").build()
-
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CallbackQueryHandler(button))
-app.add_handler(CallbackQueryHandler(confirma, pattern="confirma_.*|cancelar"))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, mensagem))
-
-app.run_polling()
+# =========================
+# MAIN
+# =========================
+if __name__ == "__main__":
+    init_db()
+    
+    app = ApplicationBuilder().token(TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(CommandHandler("help", start))
+    app.add_handler(app.builder.message_handler(mensagem))
+    
+    print("Bot rodando...")
+    app.run_polling()
