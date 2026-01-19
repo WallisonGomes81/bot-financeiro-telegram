@@ -160,9 +160,10 @@ def webhook():
     return "ok"
 
 # =========================
-# RODAR BOT LOCAL (para testes)
+# RODAR FLASK (RENDER)
 # =========================
 if __name__ == "__main__":
     init_db()
-    print("Bot rodando...")
-    application.run_polling()
+    print("Bot rodando no Render...")
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
